@@ -1,0 +1,21 @@
+# Cloudflare Worker Configuration
+# https://developers.cloudflare.com/workers/wrangler/configuration/
+
+name = "mercado-pago-scraper"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+# Email routing - this worker receives emails
+# The actual routing is configured in Cloudflare Dashboard > Email Routing
+# Set catch-all to "Send to Worker" and select this worker
+
+# Environment variables (set in Cloudflare Dashboard for production)
+# [vars]
+# WEBHOOK_URL = "https://your-production-backend.com/webhook"
+
+# You can also use secrets for sensitive values:
+# Run: wrangler secret put WEBHOOK_SECRET
+
+# Workers AI binding for expense categorization
+[ai]
+binding = "AI"

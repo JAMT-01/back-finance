@@ -1,0 +1,29 @@
+{
+  "name": "mercadopago-email-parser",
+  "version": "1.0.0",
+  "description": "Parse Mercado Pago emails and credit user accounts automatically",
+  "main": "backend_server.js",
+  "scripts": {
+    "start": "node backend_server.js",
+    "dev": "node --watch backend_server.js",
+    "db:migrate": "psql $DATABASE_URL -f src/db/schema.sql",
+    "db:reset": "psql $DATABASE_URL -c \"DROP TABLE IF EXISTS parsing_failures, transactions, users CASCADE; DROP TYPE IF EXISTS transaction_type;\" && npm run db:migrate",
+    "tunnel": "ngrok http 3000",
+    "worker:dev": "cd cloudflare-worker && wrangler dev",
+    "worker:deploy": "cd cloudflare-worker && wrangler deploy"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.86.0",
+    "bcryptjs": "^2.4.3",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.11.3"
+  },
+  "devDependencies": {
+    "wrangler": "^3.22.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
