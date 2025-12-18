@@ -8,7 +8,11 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
+const { Resend } = require('resend');
 require('dotenv').config();
+
+// Email service for forwarding verification emails
+const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -410,6 +414,69 @@ app.post('/webhook', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Webhook error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ============================================
+// EMAIL FORWARDING ENDPOINT (for Gmail verification)
+// ============================================
+
+app.post('/forward-verification', async (req, res) => {
+  try {
+    const secretKey = req.headers['x-secret-key'];
+    if (secretKey !== WEBHOOK_SECRET) {
+      console.warn('⚠️ Invalid secret for verification forwarding');
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { userId, subject, htmlBody, textBody, verificationLink } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required' });
+    }
+
+    // Get user by external_id
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('email')
+      .eq('external_id', userId)
+      .single();
+
+    if (userError || !user) {
+      console.warn(`⚠️ No user found for verification: ${userId}`);
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (!resend) {
+      console.error('❌ RESEND_API_KEY not configured');
+      return res.status(500).json({ error: 'Email service not configured' });
+    }
+
+    // Forward the verification email to the user
+    const { data, error } = await resend.emails.send({
+      from: 'Jamty Finance <noreply@jamty.xyz>',
+      to: user.email,
+      subject: subject || 'Gmail Forwarding Verification',
+      html: htmlBody || `
+        <h2>Gmail Forwarding Verification</h2>
+        <p>You requested to forward emails to your Jamty Finance account.</p>
+        ${verificationLink ? `<p><a href="${verificationLink}">Click here to confirm forwarding</a></p>` : ''}
+        <p>Or copy this link: ${verificationLink || 'N/A'}</p>
+      `,
+      text: textBody || `Gmail Forwarding Verification\n\nClick here to confirm: ${verificationLink || 'N/A'}`,
+    });
+
+    if (error) {
+      console.error('❌ Email send error:', error);
+      return res.status(500).json({ error: 'Failed to send email' });
+    }
+
+    console.log(`📧 Verification email forwarded to ${user.email} (ID: ${data.id})`);
+    return res.json({ status: 'forwarded', emailId: data.id });
+
+  } catch (error) {
+    console.error('❌ Forward verification error:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });

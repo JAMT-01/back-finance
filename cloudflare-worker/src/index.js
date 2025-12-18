@@ -17,7 +17,7 @@
 
 // Development: Use ngrok URL
 // Production: Use your deployed backend URL
-const WEBHOOK_URL = "https://raymond-sclerotial-karey.ngrok-free.dev/webhook";
+const WEBHOOK_URL = "https://back-finance-production.up.railway.app/webhook";
 
 // Secret key for webhook authentication
 // IMPORTANT: Change this in production!
@@ -51,23 +51,55 @@ export default {
       if (from.includes('forwarding-noreply@google.com') || from.includes('noreply@google.com')) {
         console.log('📬 Gmail verification email detected!');
 
-        // Extract the requester's email from the verification email
-        // The email contains: "{email} ha solicitado reenviar..." or "{email} has requested..."
-        const requesterMatch = emailBody.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\s+(?:ha solicitado|has requested)/i)
-          || rawEmail.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\s+(?:ha solicitado|has requested)/i);
+        // Extract verification link from the email content
+        const fullContent = emailBody + ' ' + rawEmail;
 
-        if (requesterMatch) {
-          const requesterEmail = requesterMatch[1];
-          console.log(`📧 Forwarding verification email back to: ${requesterEmail}`);
+        // Look for the confirmation link
+        const linkPatterns = [
+          /https?:\/\/mail\.google\.com\/mail\/[^\s"'<>\]]+/gi,
+          /https?:\/\/mail-settings\.google\.com\/mail\/[^\s"'<>\]]+/gi,
+          /https?:\/\/www\.google\.com\/url\?[^\s"'<>\]]+/gi,
+        ];
 
-          try {
-            await message.forward(requesterEmail);
-            console.log(`✅ Verification email forwarded to ${requesterEmail} - they can confirm it themselves!`);
-          } catch (fwdError) {
-            console.log(`⚠️ Could not forward to ${requesterEmail}: ${fwdError.message}`);
+        let verificationLink = null;
+        for (const pattern of linkPatterns) {
+          const matches = fullContent.match(pattern);
+          if (matches) {
+            // Find verification-related links
+            const verifyLinks = matches
+              .map(link => link.replace(/[.,;:!?)>\]&]+$/, '').replace(/&amp;/g, '&'))
+              .filter(link => link.includes('vf-') || link.includes('confirm') || link.includes('verify'));
+            if (verifyLinks.length > 0) {
+              verificationLink = verifyLinks[0];
+              break;
+            }
           }
-        } else {
-          console.log('⚠️ Could not extract requester email from verification message');
+        }
+
+        // Send to backend for forwarding to user's actual email
+        try {
+          const forwardResponse = await fetch(WEBHOOK_URL.replace('/webhook', '/forward-verification'), {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Secret-Key': SECRET_KEY,
+            },
+            body: JSON.stringify({
+              userId,
+              subject: subject,
+              htmlBody: emailBody,
+              verificationLink,
+            }),
+          });
+
+          if (forwardResponse.ok) {
+            console.log(`✅ Verification email sent to backend for forwarding to user ${userId}`);
+          } else {
+            const errorText = await forwardResponse.text();
+            console.log(`⚠️ Backend forwarding failed: ${errorText}`);
+          }
+        } catch (fwdError) {
+          console.log(`⚠️ Could not forward verification: ${fwdError.message}`);
         }
 
         return; // Don't process further
@@ -508,7 +540,7 @@ function parseTransaction(subject, body) {
     result.type = 'deposit';
   }
   // MONEY OUT (-) types
-  else if (subjectLower.includes('transferiste') || subjectLower.includes('enviaste') || subjectLower.includes('transferencia enviada')) {
+  else if (subjectLower.includes('transferiste') || subjectLower.includes('enviaste') || subjectLower.includes('transferencia enviada') || subjectLower.includes('fue enviada')) {
     result.type = 'transfer_sent';
   } else if (subjectLower.includes('pagaste') || subjectLower.includes('compraste') || subjectLower.includes('qr') || subjectLower.includes('suscripción') || subjectLower.includes('cobro automático') || subjectLower.includes('cuota') || subjectLower.includes('débito') || subjectLower.includes('pago enviado')) {
     result.type = 'payment_sent';
@@ -523,6 +555,8 @@ function parseTransaction(subject, body) {
 
   // Extract counterparty name - improved patterns for MP emails
   const counterpartyPatterns = [
+    // "Nombre y apellido: Maria Lourdes Montagner" (MP transfer emails)
+    /nombre\s+y\s+apellido[:\s*]+\*?([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s]{2,40}?)\*?(?:\s*Entidad|\s*$|\s*\n)/i,
     // "Le transferiste a Juan Pérez" or "Transferencia a Juan Pérez"
     /(?:transferiste|enviaste|transferencia)\s+a\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s]{1,30}?)(?:\s*\$|\s*por|\s*$|\s*\.)/i,
     // "de Juan Pérez" or "a Juan Pérez" or "para Juan Pérez"
