@@ -364,20 +364,8 @@ app.post('/webhook', async (req, res) => {
       }
     }
 
-    // Fallback: Also check referenceId if available
-    if (data.referenceId) {
-      const { data: existing } = await supabase
-        .from('transactions')
-        .select('id')
-        .eq('user_id', user.id)
-        .eq('reference_id', data.referenceId)
-        .single();
-
-      if (existing) {
-        console.log(`⏭️ Skipping duplicate (referenceId): ${data.referenceId}`);
-        return res.json({ status: 'skipped', reason: 'duplicate' });
-      }
-    }
+    // Note: We only use emailHash for duplicate detection now.
+    // referenceId is not reliable because MP may reuse IDs or parsing may extract wrong IDs.
 
     // Create transaction
     const { data: transaction, error: txError } = await supabase
