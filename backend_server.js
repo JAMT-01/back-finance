@@ -423,20 +423,26 @@ app.post('/webhook', async (req, res) => {
 // ============================================
 
 app.post('/forward-verification', async (req, res) => {
+  console.log('📬 Forward-verification endpoint hit');
   try {
     const secretKey = req.headers['x-secret-key'];
+    console.log('🔑 Secret key received:', secretKey ? 'yes' : 'no');
+
     if (secretKey !== WEBHOOK_SECRET) {
       console.warn('⚠️ Invalid secret for verification forwarding');
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
     const { userId, subject, htmlBody, textBody, verificationLink } = req.body;
+    console.log('📦 Request body:', { userId, subject: subject?.substring(0, 50), verificationLink: verificationLink?.substring(0, 50) });
 
     if (!userId) {
+      console.log('❌ No userId provided');
       return res.status(400).json({ error: 'userId is required' });
     }
 
     // Get user by external_id
+    console.log('🔍 Looking up user:', userId);
     const { data: user, error: userError } = await supabase
       .from('users')
       .select('email')
@@ -444,16 +450,19 @@ app.post('/forward-verification', async (req, res) => {
       .single();
 
     if (userError || !user) {
-      console.warn(`⚠️ No user found for verification: ${userId}`);
+      console.warn(`⚠️ No user found for verification: ${userId}`, userError);
       return res.status(404).json({ error: 'User not found' });
     }
+    console.log('✅ User found:', user.email);
 
     if (!resend) {
       console.error('❌ RESEND_API_KEY not configured');
       return res.status(500).json({ error: 'Email service not configured' });
     }
+    console.log('✅ Resend client configured');
 
     // Forward the verification email to the user
+    console.log('📧 Sending email via Resend...');
     const { data, error } = await resend.emails.send({
       from: 'Jamty Finance <noreply@jamty.xyz>',
       to: user.email,
@@ -468,15 +477,15 @@ app.post('/forward-verification', async (req, res) => {
     });
 
     if (error) {
-      console.error('❌ Email send error:', error);
-      return res.status(500).json({ error: 'Failed to send email' });
+      console.error('❌ Resend error:', JSON.stringify(error));
+      return res.status(500).json({ error: 'Failed to send email', details: error });
     }
 
     console.log(`📧 Verification email forwarded to ${user.email} (ID: ${data.id})`);
     return res.json({ status: 'forwarded', emailId: data.id });
 
   } catch (error) {
-    console.error('❌ Forward verification error:', error);
+    console.error('❌ Forward verification error:', error.message, error.stack);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
