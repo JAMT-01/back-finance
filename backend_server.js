@@ -423,7 +423,11 @@ app.post('/webhook', async (req, res) => {
 // ============================================
 
 app.post('/forward-verification', async (req, res) => {
-  console.log('📬 Forward-verification endpoint hit');
+  // Immediate logging before anything else
+  console.log('📬 Forward-verification endpoint hit - START');
+  console.log('📬 Request body type:', typeof req.body);
+  console.log('📬 Request body:', JSON.stringify(req.body || {}).substring(0, 500));
+
   try {
     const secretKey = req.headers['x-secret-key'];
     console.log('🔑 Secret key received:', secretKey ? 'yes' : 'no');
