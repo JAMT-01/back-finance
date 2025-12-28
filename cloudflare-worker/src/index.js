@@ -17,7 +17,7 @@
 
 // Development: Use ngrok URL
 // Production: Use your deployed backend URL
-const WEBHOOK_URL = "https://back-finance-production.up.railway.app/webhook";
+const WEBHOOK_URL = "https://web-production-d345.up.railway.app/webhook";
 
 // Secret key for webhook authentication
 // IMPORTANT: Change this in production!
@@ -105,19 +105,18 @@ export default {
         return; // Don't process further
       }
 
-      // 5. Validate sender is from Mercado Pago
-      // TEMPORARILY DISABLED FOR TESTING - uncomment in production!
-      // if (!isFromMercadoPago(from)) {
-      //   console.log(`Email not from Mercado Pago: ${from}`);
-      //   await sendToBackend({
-      //     userId,
-      //     valid: false,
-      //     reason: 'not_mercadopago',
-      //     from,
-      //     subject,
-      //   });
-      //   return;
-      // }
+      // 5. Validate sender is from Mercado Pago official transactional email
+      if (!isFromMercadoPago(from)) {
+        console.log(`Email not from official Mercado Pago transactional address: ${from}`);
+        await sendToBackend({
+          userId,
+          valid: false,
+          reason: 'not_mercadopago',
+          from,
+          subject,
+        });
+        return;
+      }
       console.log(`📧 Processing email from: ${from}`);
       console.log(`📋 Subject: ${subject}`);
       console.log(`📝 Body preview: ${emailBody.substring(0, 500).replace(/\s+/g, ' ')}`);
@@ -424,20 +423,21 @@ function decodeQuotedPrintable(str) {
 }
 
 /**
- * Check if email is from Mercado Pago
+ * Check if email is from Mercado Pago official transactional addresses
+ * Only accepts info@mercadopago.com and info@mercadopago.com.ar
+ * This filters out promotional emails from marketing@mercadopago.com etc.
  */
 function isFromMercadoPago(from) {
   if (!from) return false;
 
-  const mpDomains = [
-    'mercadopago.com',
-    'mercadopago.com.ar',
-    'mercadolibre.com',
-    'mercadolibre.com.ar',
+  // Only accept official transactional email addresses
+  const validSenders = [
+    'info@mercadopago.com',
+    'info@mercadopago.com.ar',
   ];
 
   const lowerFrom = from.toLowerCase();
-  return mpDomains.some(domain => lowerFrom.includes(domain));
+  return validSenders.some(sender => lowerFrom.includes(sender));
 }
 
 /**
