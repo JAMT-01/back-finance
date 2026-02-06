@@ -1,27 +1,114 @@
 /**
- * Mercado Pago Email Parser - Cloudflare Worker
+ * Multi-Institution Email Parser - Cloudflare Worker
  * 
  * This worker receives emails via Cloudflare Email Routing,
- * parses the content, and forwards extracted data to our backend.
+ * classifies them, and forwards extracted data to our backend.
  * 
- * Flow:
- * 1. Email arrives at user_123@jamty.xyz
- * 2. Cloudflare catch-all routes to this worker
- * 3. Worker parses email and extracts: user_id, amount, type
- * 4. Worker POSTs clean JSON to backend webhook
+ * Pipeline:
+ * 1. Email arrives at user_xxx@jamty.xyz
+ * 2. Step 1: Validate sender institution (MP, Ualá, banks, etc.)
+ * 3. Step 2: Classify intent (transaction vs promotional)
+ * 4. Step 3: Parse and normalize transaction data
+ * 5. POST to backend webhook
  */
 
 // ============================================
-// CONFIGURATION - Update for your environment
+// CONFIGURATION
 // ============================================
 
-// Development: Use ngrok URL
-// Production: Use your deployed backend URL
 const WEBHOOK_URL = "https://web-production-d345.up.railway.app/webhook";
-
-// Secret key for webhook authentication
-// IMPORTANT: Change this in production!
 const SECRET_KEY = "super_secret_password";
+
+// ============================================
+// FINANCIAL INSTITUTIONS REGISTRY
+// ============================================
+
+const FINANCIAL_INSTITUTIONS = {
+  // Fintechs
+  mercadopago: {
+    name: 'Mercado Pago',
+    type: 'fintech',
+    transactionalDomains: ['info@mercadopago.com', 'info@mercadopago.com.ar'],
+    marketingDomains: ['marketing@mercadopago.com', 'marketing@mercadopago.com.ar', 'promociones@mercadopago.com'],
+  },
+  uala: {
+    name: 'Ualá',
+    type: 'fintech',
+    transactionalDomains: ['@uala.com.ar', '@notificaciones.uala.com.ar'],
+    marketingDomains: ['@marketing.uala.com.ar', '@promo.uala.com.ar'],
+  },
+  brubank: {
+    name: 'Brubank',
+    type: 'fintech',
+    transactionalDomains: ['@brubank.com.ar', '@notificaciones.brubank.com.ar'],
+    marketingDomains: ['@marketing.brubank.com.ar'],
+  },
+  naranjax: {
+    name: 'Naranja X',
+    type: 'fintech',
+    transactionalDomains: ['@naranjax.com', '@notificaciones.naranjax.com'],
+    marketingDomains: ['@marketing.naranjax.com'],
+  },
+  personalpay: {
+    name: 'Personal Pay',
+    type: 'fintech',
+    transactionalDomains: ['@personalpay.com.ar'],
+    marketingDomains: ['@marketing.personalpay.com.ar'],
+  },
+
+  // Traditional Banks
+  galicia: {
+    name: 'Banco Galicia',
+    type: 'bank',
+    transactionalDomains: ['@bancogalicia.com.ar', '@e.bancogalicia.com.ar', '@notificaciones.bancogalicia.com.ar'],
+    marketingDomains: ['@marketing.bancogalicia.com.ar', '@ofertas.bancogalicia.com.ar'],
+  },
+  santander: {
+    name: 'Banco Santander',
+    type: 'bank',
+    transactionalDomains: ['@santander.com.ar', '@email.santander.com.ar', '@notificaciones.santander.com.ar'],
+    marketingDomains: ['@marketing.santander.com.ar', '@ofertas.santander.com.ar'],
+  },
+  bbva: {
+    name: 'BBVA',
+    type: 'bank',
+    transactionalDomains: ['@bbva.com.ar', '@notificaciones.bbva.com.ar'],
+    marketingDomains: ['@marketing.bbva.com.ar'],
+  },
+  nacion: {
+    name: 'Banco Nación',
+    type: 'bank',
+    transactionalDomains: ['@bna.com.ar', '@notificaciones.bna.com.ar'],
+    marketingDomains: ['@marketing.bna.com.ar'],
+  },
+  macro: {
+    name: 'Banco Macro',
+    type: 'bank',
+    transactionalDomains: ['@macro.com.ar', '@notificaciones.macro.com.ar'],
+    marketingDomains: ['@marketing.macro.com.ar'],
+  },
+  hsbc: {
+    name: 'HSBC Argentina',
+    type: 'bank',
+    transactionalDomains: ['@hsbc.com.ar', '@notificaciones.hsbc.com.ar'],
+    marketingDomains: ['@marketing.hsbc.com.ar'],
+  },
+  icbc: {
+    name: 'ICBC Argentina',
+    type: 'bank',
+    transactionalDomains: ['@icbc.com.ar', '@notificaciones.icbc.com.ar'],
+    marketingDomains: ['@marketing.icbc.com.ar'],
+  },
+};
+
+// Promotional keywords for quick detection
+const PROMOTIONAL_KEYWORDS = [
+  'cashback disponible', 'ganaste', 'beneficio exclusivo', 'descuento',
+  'oferta especial', 'promo', 'cupón', 'premio', 'sorteo', 'regalo',
+  'aprovechá', 'no te pierdas', 'por tiempo limitado', 'solo hoy',
+  'última oportunidad', 'exclusivo para vos', 'bonus', 'puntos extra',
+  'recompensa', 'acumulá', 'canjeá', 'duplicá', 'triplicá'
+];
 
 // ============================================
 // EMAIL HANDLER
@@ -102,33 +189,60 @@ export default {
           console.log(`⚠️ Could not forward verification: ${fwdError.message}`);
         }
 
-        return; // Don't process further
+        return;
       }
 
-      // 5. Validate sender is from Mercado Pago official transactional email
-      if (!isFromMercadoPago(from)) {
-        console.log(`Email not from official Mercado Pago transactional address: ${from}`);
+      // ====================================
+      // STEP 1: Identify Financial Institution
+      // ====================================
+      console.log(`📧 Processing email from: ${from}`);
+
+      const institution = identifyInstitution(from);
+
+      if (!institution) {
+        console.log(`⚠️ Unknown sender, not from any registered financial institution: ${from}`);
+        return; // Silently drop emails from unknown senders
+      }
+
+      console.log(`🏦 Institution: ${institution.name} (${institution.type})`);
+      console.log(`📋 Subject: ${subject}`);
+      console.log(`📝 Body preview: ${emailBody.substring(0, 300).replace(/\s+/g, ' ')}`);
+
+      // ====================================
+      // STEP 2: Classify Intent (Transaction vs Promotional)
+      // ====================================
+      const intent = await classifyEmailIntent(env, institution, subject, emailBody.substring(0, 500));
+
+      if (intent.type === 'promotional') {
+        console.log(`📣 Promotional email detected from ${institution.name} - skipping`);
+        console.log(`   Reason: ${intent.reason} (confidence: ${intent.confidence})`);
+        // Optionally log promotional emails for analytics
         await sendToBackend({
           userId,
-          valid: false,
-          reason: 'not_mercadopago',
-          from,
+          valid: true,
+          isPromotional: true,
+          institution: institution.id,
+          institutionName: institution.name,
           subject,
+          classificationReason: intent.reason,
+          receivedAt: new Date().toISOString(),
         });
         return;
       }
-      console.log(`📧 Processing email from: ${from}`);
-      console.log(`📋 Subject: ${subject}`);
-      console.log(`📝 Body preview: ${emailBody.substring(0, 500).replace(/\s+/g, ' ')}`);
 
-      // 5. Extract transaction data
-      const transaction = parseTransaction(subject, emailBody);
+      console.log(`✅ Transaction email confirmed (${intent.confidence}: ${intent.reason})`);
+
+      // ====================================
+      // STEP 3: Parse and Normalize Transaction Data
+      // ====================================
+      const transaction = await parseTransaction(env, subject, emailBody);
 
       if (!transaction.amount || transaction.amount <= 0) {
         console.log(`Could not extract amount from email`);
         await sendToBackend({
           userId,
           valid: false,
+          institution: institution.id,
           reason: 'parse_failed',
           subject,
           bodyPreview: emailBody.substring(0, 500),
@@ -136,25 +250,21 @@ export default {
         return;
       }
 
-      // 6. Categorize expenses using AI (only for money-out transactions)
-      let category = null;
-      const expenseTypes = ['transfer_sent', 'payment_sent', 'withdrawal', 'refund_sent'];
-      if (expenseTypes.includes(transaction.type)) {
-        category = await categorizeWithAI(
-          env,
-          transaction.counterparty,
-          transaction.description,
-          subject
-        );
-        console.log(`🏷️ AI Category: ${category}`);
-      }
+      // Categorize transaction using AI
+      const category = await categorizeWithAI(
+        env,
+        transaction.counterparty,
+        transaction.description,
+        subject,
+        transaction.type
+      );
+      console.log(`🏷️ AI Category: ${category}`);
 
-      // 7. Create unique email hash for duplicate detection
-      // This uses subject + first 200 chars of body to create a fingerprint
+      // Create unique email hash for duplicate detection
       const emailFingerprint = subject + emailBody.substring(0, 200);
       const emailHash = await createHash(emailFingerprint);
 
-      // 8. Send to backend
+      // Send to backend
       await sendToBackend({
         userId,
         valid: true,
@@ -164,14 +274,17 @@ export default {
         counterparty: transaction.counterparty,
         description: transaction.description,
         referenceId: transaction.referenceId,
-        emailHash, // Unique fingerprint for this specific email
+        emailHash,
         category,
+        institution: institution.id,
+        institutionName: institution.name,
+        institutionType: institution.type,
         subject,
         from,
         receivedAt: new Date().toISOString(),
       });
 
-      console.log(`✅ Processed: ${userId} - ${transaction.type} - $${transaction.amount}${category ? ` [${category}]` : ''}`);
+      console.log(`✅ Processed: ${userId} - ${institution.name} - ${transaction.type} - $${transaction.amount}${category ? ` [${category}]` : ''}`);
 
     } catch (error) {
       console.error('Worker error:', error);
@@ -423,21 +536,128 @@ function decodeQuotedPrintable(str) {
 }
 
 /**
- * Check if email is from Mercado Pago official transactional addresses
- * Only accepts info@mercadopago.com and info@mercadopago.com.ar
- * This filters out promotional emails from marketing@mercadopago.com etc.
+ * Extract clean email address from "Name <email>" format
  */
-function isFromMercadoPago(from) {
-  if (!from) return false;
+function extractEmailAddress(from) {
+  if (!from) return '';
+  const lowerFrom = from.toLowerCase().trim();
+  const emailMatch = lowerFrom.match(/<([^>]+)>/);
+  return emailMatch ? emailMatch[1].trim() : lowerFrom;
+}
 
-  // Only accept official transactional email addresses
-  const validSenders = [
-    'info@mercadopago.com',
-    'info@mercadopago.com.ar',
+/**
+ * Step 1: Identify the financial institution from sender email
+ * Returns institution info or null if unknown sender
+ */
+function identifyInstitution(from) {
+  const email = extractEmailAddress(from);
+  if (!email) return null;
+
+  for (const [id, inst] of Object.entries(FINANCIAL_INSTITUTIONS)) {
+    // Check transactional domains
+    for (const domain of inst.transactionalDomains || []) {
+      if (domain.startsWith('@')) {
+        if (email.endsWith(domain)) {
+          return { id, name: inst.name, type: inst.type, isMarketing: false };
+        }
+      } else {
+        if (email === domain) {
+          return { id, name: inst.name, type: inst.type, isMarketing: false };
+        }
+      }
+    }
+
+    // Check marketing domains
+    for (const domain of inst.marketingDomains || []) {
+      if (domain.startsWith('@')) {
+        if (email.endsWith(domain)) {
+          return { id, name: inst.name, type: inst.type, isMarketing: true };
+        }
+      } else {
+        if (email === domain) {
+          return { id, name: inst.name, type: inst.type, isMarketing: true };
+        }
+      }
+    }
+  }
+
+  return null; // Unknown sender
+}
+
+/**
+ * Step 2: Classify email intent - is this a real transaction or promotional?
+ * Uses keyword matching first (fast), falls back to AI for ambiguous cases
+ */
+async function classifyEmailIntent(env, institution, subject, bodyPreview) {
+  const subjectLower = subject.toLowerCase();
+  const bodyLower = bodyPreview.toLowerCase();
+  const fullText = subjectLower + ' ' + bodyLower;
+
+  // Quick promotional detection via keywords
+  for (const keyword of PROMOTIONAL_KEYWORDS) {
+    if (fullText.includes(keyword)) {
+      console.log(`📣 Promotional keyword detected: "${keyword}"`);
+      return { type: 'promotional', confidence: 'keyword', reason: keyword };
+    }
+  }
+
+  // If sender is from marketing domain, it's almost certainly promotional
+  if (institution.isMarketing) {
+    return { type: 'promotional', confidence: 'domain', reason: 'marketing domain' };
+  }
+
+  // Transaction keywords (high confidence)
+  const transactionKeywords = [
+    'transferiste', 'recibiste', 'pagaste', 'te transfirieron',
+    'te pagaron', 'retiro', 'depósito', 'compra', 'cobro',
+    'movimiento', 'operación exitosa', 'comprobante'
   ];
 
-  const lowerFrom = from.toLowerCase();
-  return validSenders.some(sender => lowerFrom.includes(sender));
+  for (const keyword of transactionKeywords) {
+    if (fullText.includes(keyword)) {
+      return { type: 'transaction', confidence: 'keyword', reason: keyword };
+    }
+  }
+
+  // AI classification for ambiguous cases
+  try {
+    const prompt = `Classify this ${institution.name} email. Is it about REAL money that already moved, or a PROMOTIONAL offer/bonus?
+
+Subject: ${subject}
+Preview: ${bodyPreview.substring(0, 200)}
+
+IMPORTANT: 
+- "transaction" = money ALREADY moved (transfer completed, payment made)
+- "promotional" = offers, bonuses to claim, incentives, marketing
+
+Answer with ONLY one word: transaction OR promotional`;
+
+    const result = await env.AI.run('@cf/meta/llama-3.2-3b-instruct', {
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 10,
+    });
+
+    const response = result.response?.toLowerCase().trim() || '';
+    const isTransaction = response.includes('transaction');
+
+    console.log(`🤖 AI classification: ${isTransaction ? 'transaction' : 'promotional'}`);
+    return {
+      type: isTransaction ? 'transaction' : 'promotional',
+      confidence: 'ai',
+      reason: `AI: ${response}`
+    };
+
+  } catch (error) {
+    console.error('AI classification error:', error);
+    // Default to transaction if AI fails (safer to parse than to miss)
+    return { type: 'transaction', confidence: 'fallback', reason: 'AI error' };
+  }
+}
+
+// Legacy function for backwards compatibility
+function isFromMercadoPago(from) {
+  const institution = identifyInstitution(from);
+  return institution !== null;
 }
 
 /**
@@ -455,13 +675,69 @@ const VALID_CATEGORIES = [
   'miscellaneous-other'
 ];
 
+const VALID_TRANSACTION_TYPES = [
+  'transfer_received',
+  'transfer_sent',
+  'payment_received',
+  'payment_sent',
+  'withdrawal',
+  'deposit',
+  'refund_received',
+  'refund_sent'
+];
+
 /**
- * Categorize expense using Cloudflare Workers AI
- * Uses Llama 3.2 3B for intelligent categorization
+ * Detect transaction type using Cloudflare Workers AI
+ * Analyzes email subject and body to determine transaction type
  */
-async function categorizeWithAI(env, counterparty, description, subject) {
+async function detectTransactionTypeWithAI(env, subject, bodyPreview) {
   try {
-    // Build context from available fields
+    const context = `Subject: ${subject}\nBody: ${bodyPreview.substring(0, 300)}`;
+
+    const prompt = `Analyze this Mercado Pago email and determine the transaction type.
+
+Transaction Types:
+- transfer_received: Money received via transfer (keywords: recibiste, te transfirieron, te enviaron)
+- transfer_sent: Money sent via transfer (keywords: transferiste, enviaste, transferencia enviada)
+- payment_received: Payment received for a sale (keywords: te pagaron, vendiste)
+- payment_sent: Payment made for purchase (keywords: pagaste, compraste, QR, suscripción)
+- deposit: Money added to account (keywords: ingreso, cargaste, acreditamos, cashback, bonificación)
+- withdrawal: Money withdrawn (keywords: retiro, extracción)
+- refund_received: Refund received (keywords: te devolvieron, reembolso recibido)
+- refund_sent: Refund sent (keywords: devolviste, reembolsaste)
+
+Email:
+${context}
+
+Respond with ONLY the transaction type ID (e.g., "transfer_sent"), nothing else.`;
+
+    const response = await env.AI.run('@cf/meta/llama-3.2-3b-instruct', {
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 30,
+    });
+
+    const type = response.response?.trim().toLowerCase().replace(/[^a-z_]/g, '');
+
+    if (VALID_TRANSACTION_TYPES.includes(type)) {
+      console.log(`🤖 AI detected type: ${type}`);
+      return type;
+    }
+
+    console.log(`AI returned invalid type: "${response.response}", falling back to keyword matching`);
+    return null; // Will fall back to keyword matching
+
+  } catch (error) {
+    console.error('AI type detection error:', error);
+    return null; // Will fall back to keyword matching
+  }
+}
+
+/**
+ * Categorize transaction using Cloudflare Workers AI
+ * Works for both income and expense transactions
+ */
+async function categorizeWithAI(env, counterparty, description, subject, transactionType) {
+  try {
     const context = [counterparty, description, subject]
       .filter(Boolean)
       .join(' ')
@@ -471,18 +747,22 @@ async function categorizeWithAI(env, counterparty, description, subject) {
       return 'miscellaneous-other';
     }
 
-    const prompt = `Categorize this expense into exactly ONE category.
+    // Determine if income or expense for better prompting
+    const incomeTypes = ['transfer_received', 'payment_received', 'deposit', 'refund_received'];
+    const isIncome = incomeTypes.includes(transactionType);
+
+    const prompt = `Categorize this ${isIncome ? 'income' : 'expense'} transaction into exactly ONE category.
 
 Categories:
-- utilities-bills: electricity, gas, water, internet, phone, cable
-- food-dining: restaurants, cafes, supermarkets, delivery apps, food
-- transportation: uber, taxi, fuel, parking, tolls, public transit
-- shopping-clothing: clothes, electronics, retail stores, online shopping
-- health-wellness: pharmacy, medical, gym, health insurance
-- recreation-entertainment: netflix, spotify, games, cinema, streaming
-- financial-obligations: taxes, loans, insurance premiums, bank fees
-- savings-investments: investments, crypto, stocks, savings
-- miscellaneous-other: anything else
+- utilities-bills: electricity, gas, water, internet, phone, cable, rent
+- food-dining: restaurants, cafes, supermarkets, delivery apps, food, groceries
+- transportation: uber, taxi, fuel, parking, tolls, public transit, car expenses
+- shopping-clothing: clothes, electronics, retail stores, online shopping, Amazon, MercadoLibre
+- health-wellness: pharmacy, medical, gym, health insurance, doctor, hospital
+- recreation-entertainment: netflix, spotify, games, cinema, streaming, hobbies, sports
+- financial-obligations: taxes, loans, insurance premiums, bank fees, credit card
+- savings-investments: investments, crypto, stocks, savings, interest income
+- miscellaneous-other: personal transfers, gifts, anything that doesn't fit above
 
 Transaction: "${context}"
 
@@ -495,12 +775,10 @@ Respond with ONLY the category ID (e.g., "food-dining"), nothing else.`;
 
     const category = response.response?.trim().toLowerCase().replace(/[^a-z-]/g, '');
 
-    // Validate the response is a valid category
     if (VALID_CATEGORIES.includes(category)) {
       return category;
     }
 
-    // If AI returned something invalid, default to miscellaneous
     console.log(`AI returned invalid category: "${response.response}", defaulting to miscellaneous-other`);
     return 'miscellaneous-other';
 
@@ -513,8 +791,9 @@ Respond with ONLY the category ID (e.g., "food-dining"), nothing else.`;
 
 /**
  * Parse transaction data from email content
+ * Uses AI for type detection with keyword matching as fallback
  */
-function parseTransaction(subject, body) {
+async function parseTransaction(env, subject, body) {
   const result = {
     type: 'unknown',
     amount: 0,
@@ -528,26 +807,35 @@ function parseTransaction(subject, body) {
   const bodyLower = body.toLowerCase();
   const fullText = subject + ' ' + body;
 
-  // Determine transaction type from subject and body
-  // MONEY IN (+) types
-  if (subjectLower.includes('recibiste') || subjectLower.includes('te transfirieron') || subjectLower.includes('te enviaron') || subjectLower.includes('transferencia recibida')) {
-    result.type = 'transfer_received';
-  } else if (subjectLower.includes('te pagaron') || subjectLower.includes('recibiste un pago') || subjectLower.includes('te depositaron') || subjectLower.includes('pago recibido')) {
-    result.type = 'payment_received';
-  } else if (subjectLower.includes('te devolvieron') || subjectLower.includes('reembolso') || bodyLower.includes('devolución a tu favor')) {
-    result.type = 'refund_received';
-  } else if (subjectLower.includes('ingreso') || subjectLower.includes('cargaste') || subjectLower.includes('acreditamos') || subjectLower.includes('cashback') || subjectLower.includes('bonificación') || subjectLower.includes('ganaste')) {
-    result.type = 'deposit';
-  }
-  // MONEY OUT (-) types
-  else if (subjectLower.includes('transferiste') || subjectLower.includes('enviaste') || subjectLower.includes('transferencia enviada') || subjectLower.includes('fue enviada')) {
-    result.type = 'transfer_sent';
-  } else if (subjectLower.includes('pagaste') || subjectLower.includes('compraste') || subjectLower.includes('qr') || subjectLower.includes('suscripción') || subjectLower.includes('cobro automático') || subjectLower.includes('cuota') || subjectLower.includes('débito') || subjectLower.includes('pago enviado')) {
-    result.type = 'payment_sent';
-  } else if (subjectLower.includes('devolviste') || subjectLower.includes('reembolsaste')) {
-    result.type = 'refund_sent';
-  } else if (subjectLower.includes('retiro') || bodyLower.includes('retiro') || subjectLower.includes('extracción')) {
-    result.type = 'withdrawal';
+  // Try AI-based type detection first
+  const aiType = await detectTransactionTypeWithAI(env, subject, body.substring(0, 500));
+
+  if (aiType) {
+    result.type = aiType;
+  } else {
+    // Fallback to keyword matching if AI fails
+    console.log('⚠️ AI type detection failed, using keyword matching');
+
+    // MONEY IN (+) types
+    if (subjectLower.includes('recibiste') || subjectLower.includes('te transfirieron') || subjectLower.includes('te enviaron') || subjectLower.includes('transferencia recibida')) {
+      result.type = 'transfer_received';
+    } else if (subjectLower.includes('te pagaron') || subjectLower.includes('recibiste un pago') || subjectLower.includes('te depositaron') || subjectLower.includes('pago recibido')) {
+      result.type = 'payment_received';
+    } else if (subjectLower.includes('te devolvieron') || subjectLower.includes('reembolso') || bodyLower.includes('devolución a tu favor')) {
+      result.type = 'refund_received';
+    } else if (subjectLower.includes('ingreso') || subjectLower.includes('cargaste') || subjectLower.includes('acreditamos') || subjectLower.includes('cashback') || subjectLower.includes('bonificación') || subjectLower.includes('ganaste')) {
+      result.type = 'deposit';
+    }
+    // MONEY OUT (-) types
+    else if (subjectLower.includes('transferiste') || subjectLower.includes('enviaste') || subjectLower.includes('transferencia enviada') || subjectLower.includes('fue enviada')) {
+      result.type = 'transfer_sent';
+    } else if (subjectLower.includes('pagaste') || subjectLower.includes('compraste') || subjectLower.includes('qr') || subjectLower.includes('suscripción') || subjectLower.includes('cobro automático') || subjectLower.includes('cuota') || subjectLower.includes('débito') || subjectLower.includes('pago enviado')) {
+      result.type = 'payment_sent';
+    } else if (subjectLower.includes('devolviste') || subjectLower.includes('reembolsaste')) {
+      result.type = 'refund_sent';
+    } else if (subjectLower.includes('retiro') || bodyLower.includes('retiro') || subjectLower.includes('extracción')) {
+      result.type = 'withdrawal';
+    }
   }
 
   // Extract amount

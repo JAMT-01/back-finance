@@ -12,7 +12,7 @@ const { Resend } = require('resend');
 require('dotenv').config();
 
 // Email service for forwarding verification emails
-const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
+const resend = process.env.RESEND ? new Resend(process.env.RESEND) : null;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -107,7 +107,7 @@ app.post('/api/auth/register', async (req, res) => {
     const { data: existing } = await supabase
       .from('users')
       .select('id')
-      .eq('email', email.toLowerCase())
+      .eq('email', email.toLowerCase().trim())
       .single();
 
     if (existing) {
@@ -123,7 +123,7 @@ app.post('/api/auth/register', async (req, res) => {
       .from('users')
       .insert({
         external_id: externalId,
-        email: email.toLowerCase(),
+        email: email.toLowerCase().trim(),
         password_hash: passwordHash,
         name: name || null,
         balance: 0
@@ -171,7 +171,7 @@ app.post('/api/auth/login', async (req, res) => {
     const { data: user, error } = await supabase
       .from('users')
       .select('*')
-      .eq('email', email.toLowerCase())
+      .eq('email', email.toLowerCase().trim())
       .single();
 
     if (error || !user) {
@@ -334,9 +334,22 @@ app.post('/webhook', async (req, res) => {
     const data = req.body;
     console.log('📧 Webhook received:', JSON.stringify(data, null, 2));
 
+    // Handle parsing failures
     if (!data.valid) {
       await logParsingFailure(data);
       return res.json({ status: 'logged', message: 'Parsing failure recorded' });
+    }
+
+    // Handle promotional emails (log but don't create transaction)
+    if (data.isPromotional) {
+      console.log(`📣 Promotional email from ${data.institutionName || 'unknown'}: ${data.subject}`);
+      // Could store in a 'promotions' table for analytics if needed
+      return res.json({
+        status: 'logged',
+        type: 'promotional',
+        institution: data.institution,
+        message: 'Promotional email logged'
+      });
     }
 
     // Get user by external_id
@@ -384,8 +397,9 @@ app.post('/webhook', async (req, res) => {
         reference_id: data.referenceId,
         email_hash: data.emailHash || null,
         category: data.category || null,
+        institution: data.institution || 'mercadopago', // Default for backwards compatibility
         email_subject: data.subject,
-        email_from: data.from,
+        email_from: normalizeEmail(data.from),
         received_at: data.receivedAt || new Date().toISOString(),
       })
       .select()
@@ -402,8 +416,10 @@ app.post('/webhook', async (req, res) => {
         .eq('id', user.id);
     }
 
+    const institutionLabel = data.institutionName || data.institution || 'Unknown';
     console.log(`✅ Transaction: ${transaction.id}`);
-    console.log(`   User: ${user.email}, Type: ${data.type}, Amount: $${data.amount}`);
+    console.log(`   User: ${user.email}, Institution: ${institutionLabel}`);
+    console.log(`   Type: ${data.type}, Amount: $${data.amount}`);
     console.log(`   Balance change: ${balanceChange >= 0 ? '+' : ''}${balanceChange}`);
 
     return res.json({
@@ -460,7 +476,7 @@ app.post('/forward-verification', async (req, res) => {
     console.log('✅ User found:', user.email);
 
     if (!resend) {
-      console.error('❌ RESEND_API_KEY not configured');
+      console.error('❌ RESEND not configured');
       return res.status(500).json({ error: 'Email service not configured' });
     }
     console.log('✅ Resend client configured');
@@ -510,8 +526,100 @@ app.get('/health', (req, res) => {
 // HELPER FUNCTIONS
 // ============================================
 
+/**
+ * Normalize email address for consistent storage
+ * Handles formats like "Name <email@domain.com>" or just "email@domain.com"
+ */
+function normalizeEmail(email) {
+  if (!email) return null;
+  const normalized = email.toLowerCase().trim();
+  // Extract email from "Name <email@domain.com>" format if present
+  const match = normalized.match(/<([^>]+)>/);
+  return match ? match[1].trim() : normalized;
+}
+
+// ============================================
+// TRANSACTION NORMALIZATION MAPPINGS
+// ============================================
+
+const TRANSACTION_TYPE_CONFIG = {
+  // Money IN (+)
+  transfer_received: {
+    label: 'Transfer Received',
+    direction: 'in',
+    icon: 'arrow-down-left',
+    color: 'green'
+  },
+  payment_received: {
+    label: 'Payment Received',
+    direction: 'in',
+    icon: 'wallet',
+    color: 'green'
+  },
+  deposit: {
+    label: 'Deposit',
+    direction: 'in',
+    icon: 'plus-circle',
+    color: 'green'
+  },
+  refund_received: {
+    label: 'Refund Received',
+    direction: 'in',
+    icon: 'refresh-cw',
+    color: 'green'
+  },
+  // Money OUT (-)
+  transfer_sent: {
+    label: 'Transfer Sent',
+    direction: 'out',
+    icon: 'arrow-up-right',
+    color: 'red'
+  },
+  payment_sent: {
+    label: 'Payment Sent',
+    direction: 'out',
+    icon: 'credit-card',
+    color: 'red'
+  },
+  withdrawal: {
+    label: 'Withdrawal',
+    direction: 'out',
+    icon: 'minus-circle',
+    color: 'red'
+  },
+  refund_sent: {
+    label: 'Refund Sent',
+    direction: 'out',
+    icon: 'refresh-cw',
+    color: 'red'
+  },
+  // Unknown
+  unknown: {
+    label: 'Transaction',
+    direction: 'unknown',
+    icon: 'help-circle',
+    color: 'gray'
+  }
+};
+
+const CATEGORY_LABELS = {
+  'utilities-bills': { label: 'Utilities & Bills', icon: 'zap' },
+  'food-dining': { label: 'Food & Dining', icon: 'utensils' },
+  'transportation': { label: 'Transportation', icon: 'car' },
+  'shopping-clothing': { label: 'Shopping & Clothing', icon: 'shopping-bag' },
+  'health-wellness': { label: 'Health & Wellness', icon: 'heart' },
+  'recreation-entertainment': { label: 'Recreation & Entertainment', icon: 'film' },
+  'financial-obligations': { label: 'Financial Obligations', icon: 'landmark' },
+  'savings-investments': { label: 'Savings & Investments', icon: 'trending-up' },
+  'miscellaneous-other': { label: 'Miscellaneous / Other', icon: 'more-horizontal' }
+};
+
 function formatTransaction(tx) {
+  const typeConfig = TRANSACTION_TYPE_CONFIG[tx.type] || TRANSACTION_TYPE_CONFIG.unknown;
+  const categoryConfig = tx.category ? CATEGORY_LABELS[tx.category] : null;
+
   return {
+    // Original fields
     id: tx.id,
     type: tx.type,
     amount: parseFloat(tx.amount),
@@ -520,7 +628,25 @@ function formatTransaction(tx) {
     description: tx.description,
     referenceId: tx.reference_id,
     category: tx.category || null,
+    institution: tx.institution || 'mercadopago',
     createdAt: tx.created_at,
+
+    // Normalized display fields
+    displayLabel: typeConfig.label,
+    direction: typeConfig.direction,
+    isExpense: typeConfig.direction === 'out',
+    isIncome: typeConfig.direction === 'in',
+    iconType: typeConfig.icon,
+    colorHint: typeConfig.color,
+
+    // Formatted amount with sign
+    displayAmount: typeConfig.direction === 'out'
+      ? `-$${parseFloat(tx.amount).toLocaleString('es-AR')}`
+      : `+$${parseFloat(tx.amount).toLocaleString('es-AR')}`,
+
+    // Category normalization
+    categoryLabel: categoryConfig?.label || null,
+    categoryIcon: categoryConfig?.icon || null,
   };
 }
 
@@ -539,7 +665,7 @@ async function logParsingFailure(data) {
       user_id: data.userId || null,
       reason: data.reason || 'unknown',
       email_subject: data.subject || null,
-      email_from: data.from || null,
+      email_from: normalizeEmail(data.from),
       body_preview: data.bodyPreview || null,
       raw_data: data,
     });
